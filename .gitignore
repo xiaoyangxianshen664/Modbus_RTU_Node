@@ -1,0 +1,28 @@
+# === CMake 构建产物 ===
+build/
+CMakeFiles/
+CMakeCache.txt
+
+# === Keil MDK 编译产物 ===
+Objects/
+Listings/
+DebugConfig/
+*.uvguix.*
+*.uvoptx
+*.uvopt.bak
+*.lst
+*.htm
+*.dep
+*.crf
+*.o
+*.d
+*.axf
+*.hex
+JLinkLog.txt
+
+# === 通用 ===
+*.exe
+*.obj
+*.bak
+.DS_Store
+Thumbs.db
