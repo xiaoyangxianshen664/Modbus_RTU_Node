@@ -1,0 +1,9 @@
+{
+    "C_Cpp.default.configurationProvider": "",
+    "C_Cpp.default.includePath": [
+        "${workspaceFolder}/protocol/include",
+        "${workspaceFolder}/protocol/src",
+        "${workspaceFolder}/tests",
+        "${workspaceFolder}/firmware/**"
+    ]
+}
