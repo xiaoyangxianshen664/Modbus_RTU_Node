@@ -1,0 +1,49 @@
+
+
+正点原子 时间片调度实验 — 分析
+代码结构
+
+freertos_demo()
+  └── xTaskCreate(start_task, prio=1)           ← 启动任务
+        └── vTaskStartScheduler()
+
+start_task()
+  ├── xTaskCreate(task1, prio=2)                ← 用户任务1
+  ├── xTaskCreate(task2, prio=2)                ← 用户任务2（同优先级！）
+  └── vTaskDelete(NULL)                          ← 自己删除自己
+
+task1 (prio=2)              task2 (prio=2)
+  while(1) {                 while(1) {
+    printf("task1运行次数:")    printf("task2运行次数:")
+    delay_ms(10)               delay_ms(10)
+  }                          }
+核心：两个任务同优先级
+这就是时间片调度的关键——task1 和 task2 的优先级都是 2：
+
+
+#define TASK1_PRIO  2
+#define TASK2_PRIO  2    // ← 一样的！
+FreeRTOS 开启时间片轮转后（configUSE_TIME_SLICING = 1），同优先级的任务轮流用 CPU，每个时间片（默认 1 个 tick = 1ms）切换一次。
+
+预期现象（串口输出）
+
+task1运行次数：1
+task2运行次数：1
+task1运行次数：2
+task2运行次数：2
+task1运行次数：3
+task2运行次数：3
+...
+两个任务交替执行，你一下我一下。
+
+
+总结一下这个实验就是：
+
+
+前提：configUSE_PREEMPTION = 1     （抢占式，开了）
+      configUSE_TIME_SLICING = 1    （时间片，开了）
+      
+做法：task1 优先级 = task2 优先级 = 2   （同优先级）
+
+结果：两个任务自动时间片轮转，谁都不用主动让，SysTick 到 50ms 就帮你切。
+如果时间片关了（configUSE_TIME_SLICING = 0），即使同优先级，task1 也不会主动让给 task2——因为抢占式只在高优先级抢低优先级时生效，同优先级之间谁都不抢谁，task2 直接饿死。这就是这两个宏的区别

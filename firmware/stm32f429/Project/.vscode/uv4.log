@@ -1,0 +1,12 @@
+*** Using Compiler 'V5.06 update 5 (build 528)', folder: 'D:\dowmlowm\keil\core\ARM\ARMCC\Bin'
+Build target 'Target 1'
+compiling freertos_demo.c...
+..\User\freertos_demo.c(87): error:  #8: missing closing quote
+          printf("关中�?");
+..\User\freertos_demo.c(88): error:  #18: expected a ")"
+          
+ortDISABLE_INTERRUPTS();
+..\User\freertos_demo.c: 0 warnings, 2 errors
+".\Objects\hal_429.axf" - 2 Error(s), 0 Warning(s).
+Target not created.
+Build Time Elapsed:  00:00:02

@@ -19,6 +19,21 @@ DebugConfig/
 *.axf
 *.hex
 JLinkLog.txt
+*.chm
+
+# === STM32 固件包中未参与本工程构建的资料 ===
+firmware/stm32f429/Library/CMSIS/Core/
+firmware/stm32f429/Library/CMSIS/Core_A/
+firmware/stm32f429/Library/CMSIS/docs/
+firmware/stm32f429/Library/CMSIS/DSP/
+firmware/stm32f429/Library/CMSIS/Lib/
+firmware/stm32f429/Library/CMSIS/NN/
+firmware/stm32f429/Library/CMSIS/RTOS/
+firmware/stm32f429/Library/CMSIS/RTOS2/
+firmware/stm32f429/Library/STM32F4xx_HAL_Driver/_htmresc/
+firmware/stm32f429/.claude/
+firmware/stm32f429/.vscode/
+firmware/stm32f429/Project/*-build.log
 
 # === 通用 ===
 *.exe

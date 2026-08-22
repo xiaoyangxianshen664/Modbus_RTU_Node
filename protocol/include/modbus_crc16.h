@@ -4,15 +4,20 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/**
- * @brief 计算 Modbus RTU 帧的 CRC-16 校验值。
- *
- * @param data   [输入] 待校验数据；length 为 0 时允许为 NULL。
- * @param length [输入] 待校验数据的字节数。
- * @return CRC-16 数值；发送时先发送低字节，再发送高字节。
- *
- * 示例：modbus_crc16(frame, sizeof(frame));
- */
+//调用示例
+/*   static const uint8_t request[] = {
+        // 测试数据：Modbus 读保持寄存器请求帧
+        UINT8_C(0x01), // 从机地址 0x01
+        UINT8_C(0x03), // 功能码 0x03（读保持寄存器）
+        UINT8_C(0x00), // 起始地址高字节 0x00
+        UINT8_C(0x00), // 起始地址低字节 0x00
+        UINT8_C(0x00), // 寄存器数量高字节 0x00
+        UINT8_C(0x0A), // 寄存器数量低字节 0x0A（即 10 个）
+    };
+		
+		modbus_crc16(request, sizeof(request));
+*/
+		
 uint16_t modbus_crc16(const uint8_t *data, size_t length);
 
 #endif
