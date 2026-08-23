@@ -43,7 +43,7 @@ void modbus_transport_init(void)
     htim4.Init.CounterMode = TIM_COUNTERMODE_UP; /* 向上计数模式 */
     HAL_TIM_Base_Init(&htim4);            /* 写入时基配置，完成 TIM4 初始化 */
 
-    HAL_NVIC_SetPriority(TIM4_IRQn, 0, 0);    /* 设置 TIM4 中断抢占优先级为最高(0) */
+    HAL_NVIC_SetPriority(TIM4_IRQn, 6, 0);    /* 优先级 6：允许调用 FreeRTOS FromISR API */
     HAL_NVIC_EnableIRQ(TIM4_IRQn);         /* 使能 NVIC 中 TIM4 的中断通道 */
     HAL_TIM_Base_Start_IT(&htim4);         /* 启动定时器并开启更新（溢出）中断 */
 }
@@ -111,8 +111,8 @@ void modbus_transport_frame_clear(void)
 /* ════════════════════════════════════════════════════════════
  * modbus_transport_on_timer — T3.5 定时器溢出时调用
  *
- * 原型：void modbus_transport_on_timer(void)
- * 返值：无
+ * 原型：uint8_t modbus_transport_on_timer(void)
+ * 返值：1 = 本次节拍刚达到 T3.5，0 = 尚未完成新帧
  *
  * 原理：
  *   TIM4 溢出 = 静默超过 T3.5 = 一帧结束。
@@ -120,15 +120,20 @@ void modbus_transport_frame_clear(void)
  *   TIM4 分支调用，避免重复定义回调。
  *
  * 调用示例：
- *   modbus_transport_on_timer();
+ *   if (modbus_transport_on_timer()) { notify_modbus_task(); }
  * ════════════════════════════════════════════════════════════ */
-void modbus_transport_on_timer(void)
+uint8_t modbus_transport_on_timer(void)
 {
     if (bsp_485_rx_len == 0U || frame_ready != 0U)
-        return;                             /* 无接收数据或帧未就绪，直接退出避免重复处理 */
+        return 0U;                         /* 无接收数据或已有待处理帧，避免重复通知任务 */
 
     if (silence_ms < 255U)
         silence_ms++;                       /* 静默时间 +1ms（上限 255 防止溢出回卷） */
     if (silence_ms >= 5U)
+    {
         frame_ready = 1;                    /* 持续静默达到 T3.5：正常判定一帧接收结束 */
+        return 1U;                          /* 通知上层：本次刚产生一个完整帧事件 */
+    }
+
+    return 0U;
 }

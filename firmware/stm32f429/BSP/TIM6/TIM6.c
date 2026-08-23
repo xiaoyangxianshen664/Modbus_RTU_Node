@@ -1,5 +1,6 @@
 #include "./TIM6/TIM6.h"
 #include "modbus_transport.h"   /* T3.5 定时器（TIM4 溢出时转发给传输层） */
+#include "freertos_demo.h"      /* 完整帧事件通过任务通知唤醒 ModbusTask */
 
 /* TIM6 句柄（非 static，供 it.c extern 引用） */
 TIM_HandleTypeDef htim6;
@@ -64,6 +65,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     }
     else if (htim->Instance == TIM4)
     {
-        modbus_transport_on_timer();  /* T3.5 静默超时 → 帧完成 */
+        if (modbus_transport_on_timer() != 0U)  /* T3.5 刚到达，只通知一次 */
+            modbus_task_notify_from_isr();      /* 用 FromISR API 唤醒 ModbusTask */
     }
 }

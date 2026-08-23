@@ -30,6 +30,7 @@ typedef enum
 uint16_t modbus_get_u16(const uint8_t *bytes);       // 按大端序拼接 16 位值（高字节 <<8 | 低字节）
 void modbus_put_u16(uint8_t *bytes, uint16_t value); // 将 16 位值拆分为大端字节序列
 modbus_rtu_status_t modbus_rtu_process_request(      // 校验请求并生成 Modbus RTU 响应
+
     const uint8_t *request,                          // 输入：原始请求 ADU（地址+PDU+CRC）
     size_t request_length,                           // 输入：请求 ADU 字节数
     modbus_registers_t *registers,                   // 输入/输出：寄存器映射表

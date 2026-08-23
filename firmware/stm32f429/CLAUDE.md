@@ -7,12 +7,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **芯片**：STM32F429IGTx（Cortex-M4，野火挑战者 F429 开发板）
 - **工具链**：Keil MDK（`.uvprojx`），CMSIS-DAP 调试器
 - **HAL 库**：STM32F4xx HAL Driver V1.27.0，手动移植（非 CubeMX 生成）
-- **系统**：裸机，无 RTOS；HSE = 25 MHz；NVIC Priority Group 4（仅抢占优先级 0~15）
+- **系统**：FreeRTOS 阶段 3；HSE = 25 MHz；SysTick 用于 RTOS，TIM7 提供 HAL 1ms 时基
 
 ## 目录结构
 
 ```
 hal_first_project/
+├── App/                  # 应用传输层（Modbus T1.5/T3.5）
 ├── BSP/                  # 板级支持包 — 每个外设一个文件夹，含 .h + .c
 │   ├── LED/              #   PH10(R) / PH11(G) / PH12(B)，低电平亮
 │   ├── Key/              #   KEY1(PA0) / KEY2(PC13)，高电平有效，外部下拉
@@ -21,7 +22,8 @@ hal_first_project/
 │   ├── CMSIS/            #   CMSIS Core + Device（启动文件、系统时钟配置）
 │   └── STM32F4xx_HAL_Driver/  # HAL 库源码（Inc/ + Src/）
 ├── User/
-│   ├── main.c            #   入口：HAL_Init → BSP_Init → while(1)
+│   ├── main.c            #   入口：硬件初始化 → freertos_demo → 启动调度器
+│   ├── freertos_demo.c   #   Modbus/Monitor/Acquire/Log 四任务
 │   ├── stm32f4xx_it.c    #   中断服务函数（SysTick / HardFault / EXTI）
 │   └── stm32f4xx_hal_conf.h  # HAL 模块裁剪开关
 ├── Project/              # Keil 工程文件 (.uvprojx) + 编译输出
@@ -30,11 +32,11 @@ hal_first_project/
 
 ## 已启用的 HAL 模块
 
-在 `User/stm32f4xx_hal_conf.h` 中通过宏裁剪，当前只开了 6 个：
-`HAL_GPIO_MODULE_ENABLED`, `HAL_EXTI_MODULE_ENABLED`, `HAL_DMA_MODULE_ENABLED`,
-`HAL_RCC_MODULE_ENABLED`, `HAL_FLASH_MODULE_ENABLED`, `HAL_PWR_MODULE_ENABLED`, `HAL_CORTEX_MODULE_ENABLED`
+以 `User/stm32f4xx_hal_conf.h` 的实时配置为准。阶段 3 当前已启用：
+`ADC`, `IWDG`, `RTC`, `SD`, `TIM`, `UART`, `GPIO`, `EXTI`, `DMA`,
+`RCC`, `FLASH`, `PWR`, `CORTEX`。
 
-其余模块（UART/SPI/TIM/I2C 等）均为注释状态，用到时需要先取消注释对应的 `#define HAL_xxx_MODULE_ENABLED`。
+新增其他外设时仍需同步检查对应的 `HAL_xxx_MODULE_ENABLED` 和 Keil 驱动源码。
 
 ## 代码规范（BSP 层）
 
@@ -72,7 +74,7 @@ void Xxx_Init(void)
 - **LED 宏风格**：`LED_R(0)` 亮 / `LED_R(1)` 灭（低电平有效）
 - **ISR 内不调用 HAL_Delay**，用 `for(volatile ...)` 做简单消抖
 - **中断服务函数末尾清标志**，不提前清
-- **main 入口固定流程**：`HAL_Init()` → 各外设 `_Init()` → `while(1)`
+- **main 入口流程**：`HAL_Init()` → 各外设 `_Init()` → `freertos_demo()` → FreeRTOS 调度
 
 ## 添加新 HAL 模块的步骤
 

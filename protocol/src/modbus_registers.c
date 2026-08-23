@@ -17,13 +17,13 @@ static uint16_t table_count(modbus_register_table_t table)
 {
     if (table == MODBUS_REGISTER_INPUT)
     {
-        return MODBUS_INPUT_REGISTER_COUNT; // 返回输入寄存器数量：12 个
+        return MODBUS_INPUT_REGISTER_COUNT; 	// 返回输入寄存器数量：12 个
     }
     if (table == MODBUS_REGISTER_HOLDING)
     {
         return MODBUS_HOLDING_REGISTER_COUNT; // 返回保持寄存器数量：4 个
     }
-    return 0U; // 非法表类型，返回 0
+    return 0U; 																// 非法表类型，返回 0
 }
 
 /* ════════════════════════════════════════════════════════════
@@ -53,7 +53,7 @@ static int holding_value_is_valid(uint16_t address, uint16_t value)
     {
         return value <= 1U; // SD 日志开关：只能是 0 或 1
     }
-    return 1; // 其余地址无限制，直接返回合法
+    return 1; 							// 其余地址无限制，直接返回合法
 }
 
 /* ════════════════════════════════════════════════════════════

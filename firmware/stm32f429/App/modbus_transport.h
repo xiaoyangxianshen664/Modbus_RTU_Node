@@ -14,7 +14,7 @@
 
 void    modbus_transport_init(void);        /* 初始化 T3.5 定时器（TIM4） */
 void    modbus_transport_on_byte(void);     /* 每收 1 字节调用：重置 T3.5 计时 */
-void    modbus_transport_on_timer(void);    /* TIM4 溢出时调用（由 HAL 回调转发） */
+uint8_t modbus_transport_on_timer(void);    /* TIM4 节拍调用；本次刚完成一帧时返回 1 */
 uint8_t modbus_transport_frame_ready(void); /* 查询：一帧是否已收完 */
 uint8_t modbus_transport_frame_valid(void); /* 查询：帧内是否没有超过 T1.5 的间隔 */
 void    modbus_transport_frame_clear(void); /* 清"帧完成"标志 */

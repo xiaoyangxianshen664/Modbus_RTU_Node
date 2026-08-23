@@ -71,7 +71,7 @@ void BSP_485_Init(void)
     HAL_UART_Init(&bsp_485_huart);
 
     /* ③ 启动接收中断 */
-    HAL_NVIC_SetPriority(BSP_485_IRQn, 0, 0);
+    HAL_NVIC_SetPriority(BSP_485_IRQn, 5, 0);
     HAL_NVIC_EnableIRQ(BSP_485_IRQn);
     __HAL_UART_ENABLE_IT(&bsp_485_huart, UART_IT_RXNE);									//如果有数据来了，允许产生中断，此处为开阀门
 

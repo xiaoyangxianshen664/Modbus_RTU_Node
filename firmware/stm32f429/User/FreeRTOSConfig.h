@@ -43,7 +43,7 @@ extern uint32_t SystemCoreClock;
  *    2. 或用 FlyMcu 擦除芯片：STMISP → 擦除芯片
  * 野火注释里也提醒了，开了以后下载失败不好恢复，初学阶段建议保持 0。
  */
-#define configUSE_TICKLESS_IDLE 1                /* ★ 开 Tickless：Idle 不空转，WFI 睡觉 */
+#define configUSE_TICKLESS_IDLE 0                /* 阶段 3 首次联调关闭，避免低功耗影响通信排查 */
 
 /* CPU 内核时钟频率，即 HCLK = 180MHz（F429 主频） */
 #define configCPU_CLOCK_HZ (SystemCoreClock)
@@ -166,13 +166,15 @@ extern uint32_t SystemCoreClock;
  *                       FreeRTOS 运行状态与调试
  * -----------------------------------------------------------------------------
  */
-/* 开启运行时统计（需配合定时器提供时基）
- * 可统计每个任务占用 CPU 时间。下面两个 port 宏负责桥接硬件定时器。
+/* 运行时统计开关（需配合定时器提供时基）
+ * 阶段 3 首次联调先关闭；后续打开时，下面两个 port 宏负责桥接 TIM6。
  */
-#define configGENERATE_RUN_TIME_STATS 1						//用于控制是否开启“任务运行时间统计”功能的配置宏。
+#define configGENERATE_RUN_TIME_STATS 0                     // 阶段 3 首次联调先关闭，减少 TIM6 额外中断
+#if (configGENERATE_RUN_TIME_STATS == 1)
 #include "../BSP/TIM6/TIM6.h"                                               /* ConfigureTimeForRunTimeStats 声明 */
 #define portCONFIGURE_TIMER_FOR_RUN_TIME_STATS()  ConfigureTimeForRunTimeStats()
 #define portGET_RUN_TIME_COUNTER_VALUE()          FreeRTOSRunTimeTicks        /* TIM6 全局计数器 */
+#endif
 
 /* 开启可视化追踪（配合 Tracealyzer）
  * uxTaskGetSystemState / vTaskGetInfo / vTaskList 等 API 需要此宏。
