@@ -21,9 +21,16 @@
   - TIM4 近似实现 T1.5 帧内间隔检查和 T3.5 帧结束判断
   - 主循环调用阶段 1 协议层解析请求并发送响应
   - 0x03 / 0x04 / 0x06 / 0x10、异常、广播和 CRC 错误实机验证
+- 阶段 3：FreeRTOS 多任务接入已完成 ✅
+  - 建立 Monitor、Modbus、Acquire、Log 四个业务任务及优先级
+  - TIM4 检测到 T3.5 后，通过任务通知唤醒 ModbusTask
+  - 使用互斥锁保护共享寄存器，锁内只复制或提交快照
+  - MonitorTask 和 AcquireTask 保持 100 ms 周期，LogTask 模拟低优先级耗时负载
+  - 低优先级负载运行期间连续轮询约 20 秒，共收到 189 帧完整响应，CRC 错误为 0
 
 阶段 1 的 PC 端测试使用 CMake、gcc 和 CTest，当前 4 组测试全部通过。
 阶段 2 修正 T1.5 状态机后，8 项 RS485 串口测试已重新回归并全部通过。
+阶段 3 Keil 编译为 0 Error、0 Warning，读写、异常、广播和连续轮询实机验证全部通过。
 
 ## 项目结构
 
@@ -31,7 +38,7 @@
 protocol/include/   协议层头文件
 protocol/src/       协议层实现
 tests/              PC 端单元测试与集成测试
-firmware/           STM32F429 固件工程（阶段 2 开始使用）
+firmware/           STM32F429 + FreeRTOS 固件工程
 docs/               项目文档、架构图和测试资料
 ```
 
@@ -45,6 +52,6 @@ ctest --test-dir build --output-on-failure
 
 ## 后续计划
 
-阶段 3：在当前裸机传输链路上接入 FreeRTOS，拆分接收、协议处理和数据采集任务。
+阶段 4：接入双通道 ADC DMA，将电位器和 NTC 温度采集结果映射到 Modbus 输入寄存器。
 
 完整项目说明（架构图、任务表、寄存器表、接线图和测试截图）在阶段 8 统一补齐。
