@@ -10,6 +10,7 @@
 extern void xPortSysTickHandler(void);
 extern DMA_HandleTypeDef hdma_usart1_tx;
 extern DMA_HandleTypeDef hdma_usart1_rx;
+extern DMA_HandleTypeDef hdma_adc;
 
 /******************************************************************************/
 /*           Cortex-M4 系统异常处理                                           */
@@ -160,6 +161,12 @@ void DMA2_Stream7_IRQHandler(void)
 void DMA2_Stream5_IRQHandler(void)
 {
     HAL_DMA_IRQHandler(&hdma_usart1_rx);
+}
+
+/* ADC1 使用 DMA2 Stream0；HAL 在这里分发半传输/全传输回调。 */
+void DMA2_Stream0_IRQHandler(void)
+{
+    HAL_DMA_IRQHandler(&hdma_adc);
 }
 
 /******************************************************************************/

@@ -7,6 +7,7 @@
 #include "./485/bsp_485.h"
 #include "modbus_transport.h"
 #include "freertos_demo.h"
+#include "./ADC/ADC_Multi.h"
 #include <stdio.h>
 
 /* ════════════════════════════════════════════════════════════
@@ -38,8 +39,9 @@ int main(void)
 
   BSP_485_Init();                                     // USART2 + PB8 DE/RE，9600 8E1，默认进入接收模式
   modbus_transport_init();                            // TIM4 计量 T1.5/T3.5，判断帧内超时和帧结束
+  ADC_Multi_Init();                                   // 阶段 4：启动 PC3 + PA4 两路 ADC DMA 扫描
 
-  printf("Modbus RTU Node - FreeRTOS stage 3!\r\n"); // 调度器启动前从 USART1 输出一次启动信息
+  printf("Modbus RTU Node - ADC DMA stage 4!\r\n");  // 调度器启动前从 USART1 输出一次启动信息
 
   freertos_demo();                                    // 创建四个业务任务并启动 FreeRTOS 调度器
 

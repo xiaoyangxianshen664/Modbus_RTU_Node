@@ -1,9 +1,9 @@
 /**
   ******************************************************************************
   * @file    freertos_demo.c
-  * @brief   阶段 3 FreeRTOS 四任务应用
+  * @brief   阶段 4 FreeRTOS Modbus + ADC DMA 采集应用
   * @note    ModbusTask 处理通信，MonitorTask 监控周期，
-  *          AcquireTask 模拟采集，LogTask 模拟低优先级日志负载。
+  *          AcquireTask 处理 ADC DMA 数据，LogTask 模拟低优先级日志负载。
   ******************************************************************************
   */
 
@@ -15,7 +15,10 @@
 #include "modbus_transport.h"
 #include "modbus_rtu.h"
 #include "modbus_registers.h"
+#include "./ADC/ADC_Multi.h"
 #include <string.h>
+#include <math.h>
+#include <stdio.h>
 /* ════════════════════════════════════════════════════════════
  * 阶段 3 任务优先级配置
  *
@@ -46,7 +49,7 @@
 
 #define MODBUS_TASK_STACK_SIZE    512U  // ModbusTask 栈：512 word，约 2KB
 #define MONITOR_TASK_STACK_SIZE   128U  // MonitorTask 栈：128 word，约 512B
-#define ACQUIRE_TASK_STACK_SIZE   128U  // AcquireTask 栈：128 word，约 512B
+#define ACQUIRE_TASK_STACK_SIZE   256U  // AcquireTask 栈：256 word，约 1KB（含采样快照和浮点换算）
 #define LOG_TASK_STACK_SIZE       128U  // LogTask 栈：128 word，约 512B
 
 /* ════════════════════════════════════════════════════════════
@@ -57,7 +60,7 @@
  * ════════════════════════════════════════════════════════════ */
 
 #define MONITOR_PERIOD_MS         100U   // MonitorTask 每 100ms 执行一次健康监测
-#define ACQUIRE_PERIOD_MS         100U   // AcquireTask 每 100ms 更新一次模拟采集值
+#define ACQUIRE_PERIOD_MS         100U   // 无 DMA 通知时的初始等待时间
 #define LOG_PERIOD_MS             1000U  // LogTask 每 1s 获取一次寄存器快照
 
 /* ════════════════════════════════════════════════════════════
@@ -146,7 +149,7 @@ static uint8_t g_response[MODBUS_MAX_ADU_SIZE];  // 协议层生成的响应帧�
 
 static volatile uint32_t g_modbus_heartbeat;   // ModbusTask 每成功处理一帧后加 1
 static volatile uint32_t g_monitor_heartbeat;  // MonitorTask 每 100ms 执行一次后加 1
-static volatile uint32_t g_acquire_heartbeat;  // AcquireTask 每完成一次模拟采集后加 1
+static volatile uint32_t g_acquire_heartbeat;  // AcquireTask 每完成一批 ADC 采样后加 1
 static volatile uint32_t g_log_heartbeat;      // LogTask 每完成一次模拟日志操作后加 1
 static volatile uint16_t g_last_logged_input;  // LogTask 最近一次复制并记录的 input[0] 数值
 
@@ -161,6 +164,7 @@ static volatile uint16_t g_last_logged_input;  // LogTask 最近一次复制并�
  * ════════════════════════════════════════════════════════════ */
 
 static volatile uint8_t g_modbus_task_ready;  // 1 表示 ModbusTask 已启动，可以接收 ISR 通知
+static volatile uint8_t g_acquire_task_ready; // 1 表示 AcquireTask 已启动，可以接收 DMA 通知
 
 /* ════════════════════════════════════════════════════════════
  * Idle Task 和 Timer Task 的静态内存
@@ -340,6 +344,25 @@ void modbus_task_notify_from_isr(void)
 }
 
 /* ════════════════════════════════════════════════════════════
+ * adc_dma_notify_from_isr — DMA 完成时唤醒 AcquireTask
+ *
+ * 原型：void adc_dma_notify_from_isr(void)
+ * 形参：无；返值：无
+ * 原理：DMA 回调运行在中断上下文，只发送任务通知，不做求平均、浮点换算
+ *       或寄存器访问，把耗时工作留给 AcquireTask。
+ * ════════════════════════════════════════════════════════════ */
+void adc_dma_notify_from_isr(void)
+{
+    BaseType_t higherPriorityTaskWoken = pdFALSE;
+
+    if (AcquireTaskHandle != NULL && g_acquire_task_ready != 0U)
+    {
+        vTaskNotifyGiveFromISR(AcquireTaskHandle, &higherPriorityTaskWoken);
+        portYIELD_FROM_ISR(higherPriorityTaskWoken);
+    }
+}
+
+/* ════════════════════════════════════════════════════════════
  * modbus_task — 等待完整帧通知，解析请求并发送响应
  *xTaskCreate(modbus_task,
  *           "ModbusTask",
@@ -465,35 +488,134 @@ static void monitor_task(void *pvParameters)
     }
 }
 
-/* ════════════════════════════════════════════════════════════
- * acquire_task — 周期生成模拟采集值并更新输入寄存器
+/**
+ * @brief  ADC 数据采集任务
+ * @param  pvParameters 任务参数，本任务未使用
+ * @return 无；任务函数不会返回
  *
- * 原型：static void acquire_task(void *pvParameters)
- *       pvParameters — [输入] 任务参数，本任务未使用
- * 返值：无；任务函数不会返回
+ * @原理：
+ *         DMA 持续采集 PC3 和 PA4 两路 ADC 数据。
+ *         DMA 完成半缓冲区或整缓冲区后，通过任务通知唤醒本任务。
+ *         本任务复制已经完成的缓冲区，分别计算两路 ADC 平均值，
+ *         再进行工程量换算、温度换算、报警判断和寄存器更新。
  *
- * 原理：阶段 3 用递增数代替 ADC；阶段 4 再替换为 DMA 采样和工程量换算。
- *
- * 调用示例：
- *   xTaskCreate(acquire_task, "AcquireTask", 128, NULL, 2, &handle);
- * ════════════════════════════════════════════════════════════ */
+ * @调用示例：
+ *         xTaskCreate(acquire_task, "AcquireTask",
+ *                     ACQUIRE_TASK_STACK_SIZE, NULL,
+ *                     ACQUIRE_TASK_PRIORITY, &AcquireTaskHandle);
+ */
 static void acquire_task(void *pvParameters)
 {
-    TickType_t lastWakeTime = xTaskGetTickCount();
-    uint16_t simulatedValue = 0U;
+    uint16_t sample_copy[ADC_BUF_SIZE / 2U];													// 保存 DMA 已完成半区的数据，避免直接读取正在改写的缓冲区
+    const uint16_t samples_per_channel = ADC_SAMPLES_PER_BATCH / 2U;	//它表示：当前处理的半区中，每个通道各有 16 次采样。
 
-    (void)pvParameters;
+    (void)pvParameters;																								// 本任务没有使用创建任务时传入的参数，避免爆警告
+    g_acquire_task_ready = 1U; 																				// 任务真正开始运行后，DMA 中断才允许发送通知
 
     for (;;)
     {
-        simulatedValue++;                                            // 模拟一个持续变化的采集量
+        uint8_t ready_flags;																					// 保存 DMA 半区完成标志
+        uint32_t pot_sum = 0U;																				// 用于保存电位器 ADC 累加值
+        uint32_t ntc_sum = 0U;																				// 用于保存 NTC ADC 累加值
+        uint16_t pot_raw;																							// 用于保存 电位器平均 ADC 原始值
+        uint16_t ntc_raw; 																						// 用于保存NTC 平均 ADC 原始值
+        uint16_t pot_x10;																						  // 电位器工程量
+        uint16_t ntc_temp_x10;																				// NTC 温度，放大 10 倍保存
+        uint16_t alarm_status;																				// 报警状态
+        uint16_t sample_period_ms;																		// 采集任务处理周期
+        uint16_t alarm_low_x10;																				// 报警下限，单位为 0.1℃
+        uint16_t alarm_high_x10;																			// 报警上限，单位为 0.1℃
 
-        xSemaphoreTake(RegisterMutex, portMAX_DELAY);                 // 保护共享寄存器
-        modbus_registers_update_input(&g_registers, 0U, simulatedValue); // 将模拟值映射到 input[0]
+        /* 没有 DMA 完成事件时阻塞，不占用 CPU。 */
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));									// 取出任务通知，并清除通知计数
+																																			// 最多等 100ms，收到通知就立即醒来，没收到就超时返回。
+        /* 复制刚刚完成的半区，避免 DMA 正在改写时直接计算。 */
+        taskENTER_CRITICAL();																					// 临时保护 DMA 缓冲区和完成标志
+        ready_flags = adc_buf_ready;																	// 读取 DMA 当前完成的是哪一半，1是前半段，2是后半段
+        adc_buf_ready = 0U;																						// 清除本次完成标志，等待下一次 DMA 事件
+
+        if ((ready_flags & 2U) != 0U)																	// bit1=1：DMA 后半区已经完成
+        {
+            memcpy(sample_copy, &adc_buf[ADC_BUF_SIZE / 2U],					// 将后半区复制到任务自己的临时数组
+                   sizeof(sample_copy));
+        }
+        else if ((ready_flags & 1U) != 0U)														// bit0=1：DMA 前半区已经完成
+        {
+            memcpy(sample_copy, adc_buf, sizeof(sample_copy));				// 将前半区复制到任务自己的临时数组
+        }
+        else
+        {
+            taskEXIT_CRITICAL();																			// 没有有效 DMA 数据，先恢复中断
+            continue;																									// 回到for循环，重新等待下一次通知
+        }	
+        taskEXIT_CRITICAL();																					// 数据复制完成，恢复被临时屏蔽的中断
+
+        for (uint16_t index = 0U; index < samples_per_channel; ++index)// 遍历当前半区中的每一组采样，通道数ADC_CH_COUNT=2
+        {
+            pot_sum += sample_copy[index * ADC_CH_COUNT];       			// Rank1：取 PC3 电位器数据累加
+            ntc_sum += sample_copy[index * ADC_CH_COUNT + 1U];   			// Rank2：取 PA4 NTC 数据累加
+        }
+        pot_raw = (uint16_t)(pot_sum / samples_per_channel);					// 计算电位器 ADC 平均值，总值pot_sum/16
+        ntc_raw = (uint16_t)(ntc_sum / samples_per_channel);					// 计算 NTC ADC 平均值，总值ntc_raw/16
+        pot_x10 = (uint16_t)(((uint32_t)pot_raw * 1000U) / 4095U);		// 电位器AO值0~4095 换算为 0~1000
+
+        /* 分压假设：3.3V -> 10K 固定电阻 -> PA4 -> NTC -> GND。 */
+        if (ntc_raw == 0U || ntc_raw >= 4095U)												// ADC 到达边界时无法反推出有效电阻
+        {
+            ntc_temp_x10 = 0U;																				// 无效输入暂按 0.0℃处理
+        }
+        else
+        {
+            const float resistance = 10000.0f * (float)ntc_raw /			// 根据分压公式计算 NTC 电阻
+                                      (float)(4095U - ntc_raw);
+            const float kelvin = 1.0f /																// 使用 10K、B3950 参数计算开尔文温度
+                ((1.0f / 298.15f) + (logf(resistance / 10000.0f) / 3950.0f));
+            float celsius_x10 = (kelvin - 273.15f) * 10.0f;						// 开尔文转摄氏度，并放大 10 倍
+            if (celsius_x10 < 0.0f)																		// 防止结果低于允许保存范围
+                celsius_x10 = 0.0f;
+            if (celsius_x10 > 800.0f)																  // 防止结果超过 80.0℃
+                celsius_x10 = 800.0f;
+            ntc_temp_x10 = (uint16_t)celsius_x10;										  // 转成整数，准备写入 Modbus 寄存器
+        }
+
+        /* 读取配置和更新输入寄存器必须使用同一把互斥锁。 */
+        xSemaphoreTake(RegisterMutex, portMAX_DELAY);									// 获取寄存器互斥锁，保护共享寄存器
+        sample_period_ms = g_registers.holding[0];										// 读取采集任务处理周期
+        alarm_low_x10 = g_registers.holding[1];												// 读取温度报警下限
+        alarm_high_x10 = g_registers.holding[2];											 // 读取温度报警上限
+        if (alarm_low_x10 > alarm_high_x10)														 // 下限大于上限，配置顺序错误
+            alarm_status = 3U;                 												  // 3=报警配置错误
+        else if (ntc_temp_x10 < alarm_low_x10)													// 当前温度低于报警下限
+            alarm_status = 1U;                 													// 1=低温报警
+        else if (ntc_temp_x10 > alarm_high_x10)													// 当前温度高于报警上限
+            alarm_status = 2U;               														// 2=高温报警
+        else
+            alarm_status = 0U;                 													// 0=温度处于正常范围
+
+        modbus_registers_update_input(&g_registers, 0U, pot_raw);			  // input[0]写入电位器原始值
+        modbus_registers_update_input(&g_registers, 1U, pot_x10);				// input[1]写入电位器工程量
+        modbus_registers_update_input(&g_registers, 2U, ntc_raw);				// input[2]写入NTC原始值
+        modbus_registers_update_input(&g_registers, 3U, ntc_temp_x10);	// input[3]写入温度×10
+        modbus_registers_update_input(&g_registers, 4U, alarm_status);	 // input[4]写入报警状态
         xSemaphoreGive(RegisterMutex);
 
-        g_acquire_heartbeat++;
-        vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(ACQUIRE_PERIOD_MS)); // 每 100ms 更新一次
+        /* USART1 调试输出：不用浮点 printf，×10 数值手动拆成整数和小数。 */
+        printf("ADC pot_raw=%u, pot=%u.%u%%, ntc_raw=%u, temp=%u.%uC, alarm=%u\r\n",
+               (unsigned)pot_raw,																							// 输出电位器 ADC 原始值
+               (unsigned)(pot_x10 / 10U), (unsigned)(pot_x10 % 10U),					// 输出电位器工程量
+               (unsigned)ntc_raw,																							// 输出 NTC ADC 原始值											
+               (unsigned)(ntc_temp_x10 / 10U), (unsigned)(ntc_temp_x10 % 10U),// 输出温度工程值
+               (unsigned)alarm_status);																				// 输出报警状态
+
+							 
+				/*
+				每成功处理一批 ADC 数据，就加 1。
+				它不是 ADC 数据，而是一个运行状态计数器，后面的 MonitorTask 可以通过观察它是否继续增加，判断 AcquireTask 有没有卡死
+				*/
+        g_acquire_heartbeat++;																								 // 记录采集任务成功处理了一次数据
+        if (sample_period_ms == 0U)																						 // 这里判断它是否被设置成了 0。虽然寄存器写入函数已经禁止 holding[0] 写 0，但这里仍然再保护一次。
+            sample_period_ms = ACQUIRE_PERIOD_MS;															 // 如果发现周期是 0，就恢复默认值100ms采样
+        vTaskDelay(pdMS_TO_TICKS(sample_period_ms));													 // AcquireTask 进入阻塞态约 1000ms，把 CPU 让给其他任务。延时结束后，它会回到 for (;;) 循环，继续等待下一次 ADC DMA 通知。
     }
 }
 

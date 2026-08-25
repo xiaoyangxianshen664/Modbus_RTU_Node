@@ -1,21 +1,23 @@
 #include "./ADC/ADC_Multi.h"
 
+/* 由应用层提供：DMA 回调只负责把事件转交给 AcquireTask任务。 */
+extern void adc_dma_notify_from_isr(void);
+
 /* ================== 全局变量定义 ================== */
 ADC_HandleTypeDef    hadc1;           /* ADC1 句柄（HAL库核心结构体） */
 DMA_HandleTypeDef    hdma_adc;        /* ADC DMA 句柄 */
-uint16_t             adc_buf[ADC_BUF_SIZE]; /* DMA目标缓冲区，存放3路ADC值 */
-uint8_t              adc_buf_ready = 0;     /* DMA传输完成标志（可用于中断回调） */
+uint16_t             adc_buf[ADC_BUF_SIZE]; /* DMA目标缓冲区，按扫描顺序存放两路 ADC 值 */
+volatile uint8_t     adc_buf_ready = 0;     /* 1=半传输完成，2=全传输完成 */
 
 /**
  * @brief  ADC多通道+DMA初始化函数
- * @note   配置ADC1扫描3个通道，通过DMA循环搬运数据
+ * @note   配置 ADC1 扫描 PC3、PA4，通过 DMA 循环搬运数据
  */
 void ADC_Multi_Init(void)
 {
     /* ========== ① 开启所有相关时钟 ========== */
-    ADC_CH1_GPIO_CLK();      // GPIOC时钟（PC3）
-    ADC_CH2_GPIO_CLK();      // GPIOA时钟（PA4、PA6）
-    ADC_CH3_GPIO_CLK();      // GPIOA时钟（重复开启无影响）
+    ADC_CH1_GPIO_CLK();      // GPIOC时钟（PC3），电位器
+    ADC_CH2_GPIO_CLK();      // GPIOA时钟（PA4），温度传感器
     ADCx_CLK_ENABLE();       // ADC1时钟
     ADC_DMA_CLK_ENABLE();    // DMA2时钟
 
@@ -32,10 +34,6 @@ void ADC_Multi_Init(void)
     gpio_init.Pin = ADC_CH2_PIN;
     HAL_GPIO_Init(ADC_CH2_PORT, &gpio_init);
 
-    // 通道3：PA6
-    gpio_init.Pin = ADC_CH3_PIN;
-    HAL_GPIO_Init(ADC_CH3_PORT, &gpio_init);
-
     /* ========== ③ DMA配置 ========== */
     hdma_adc.Instance                 = ADC_DMA_STREAM;      // DMA2_Stream0
     hdma_adc.Init.Channel             = ADC_DMA_CHANNEL;     // Channel 0
@@ -48,6 +46,10 @@ void ADC_Multi_Init(void)
     hdma_adc.Init.Priority            = DMA_PRIORITY_HIGH;   // 高优先级
     hdma_adc.Init.FIFOMode            = DMA_FIFOMODE_DISABLE;// 直接模式（FIFO禁用）
     HAL_DMA_Init(&hdma_adc);
+
+    /* DMA 回调需要调用 FreeRTOS FromISR API，优先级必须不高于 5。 */
+    HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 6, 0);
+    HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
 
     /* 将DMA句柄绑定到ADC句柄（HAL库内部使用） */
     __HAL_LINKDMA(&hadc1, DMA_Handle, hdma_adc);
@@ -63,7 +65,7 @@ void ADC_Multi_Init(void)
     hadc1.Init.ExternalTrigConvEdge  = ADC_EXTERNALTRIGCONVEDGE_NONE; // 软件触发
     hadc1.Init.ExternalTrigConv      = ADC_SOFTWARE_START;
     hadc1.Init.DataAlign             = ADC_DATAALIGN_RIGHT;   // 右对齐（方便读取）
-    hadc1.Init.NbrOfConversion       = ADC_CH_COUNT;          // ★ 转换通道数 = 3
+    hadc1.Init.NbrOfConversion       = ADC_CH_COUNT;          // 扫描两个通道
     hadc1.Init.DMAContinuousRequests = ENABLE;                // DMA连续请求
     hadc1.Init.EOCSelection          = DISABLE;               // EOC标志在每个通道转换后不置位（扫描模式推荐）
     HAL_ADC_Init(&hadc1);
@@ -83,18 +85,13 @@ void ADC_Multi_Init(void)
     ch_conf.Rank    = 2;
     HAL_ADC_ConfigChannel(&hadc1, &ch_conf);
 
-    // Rank 3 → 通道6（PA6）
-    ch_conf.Channel = ADC_CH3_CHANNEL;
-    ch_conf.Rank    = 3;
-    HAL_ADC_ConfigChannel(&hadc1, &ch_conf);
-
     /* ========== ⑥ 启动ADC+DMA ========== */
     /*
      * 启动后行为：
-     * 1. ADC自动按 Rank1→Rank2→Rank3 扫描
+     * 1. ADC自动按 Rank1→Rank2 扫描
      * 2. 每转换完一个通道，DMA自动搬运到 adc_buf[]
-     * 3. 转换完3个通道后，DMA自动回到buf起始地址（循环）
-     * 4. 主循环中可直接读取 adc_buf[0]~[2]
+     * 3. 完成一批扫描后触发 DMA 中断，随后继续循环覆盖缓冲区
+     * 4. AcquireTask 在任务上下文中复制并平均数据
      */
     HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_buf, ADC_BUF_SIZE);
 		/*
@@ -109,15 +106,50 @@ void ADC_Multi_Init(void)
 }
 
 /*
- * ================== 可选：DMA传输完成回调函数 ==================
- * 如果需要半传输/全传输中断，可取消注释并在main中启用
+ * ================== DMA传输完成回调函数 ==================
+ * HAL_DMA_IRQHandler 会在半传输和全传输时分别调用下面两个回调。
  */
-/*
-void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
+/**
+ * @brief  ADC DMA 半传输完成回调
+ * @param  hadc ADC 句柄，用于确认本次事件是否来自 ADC1
+ * @return 无
+ * @note   DMA 完成前半段缓冲区后进入本函数，只记录状态并通知 AcquireTask。
+ *         求平均、温度换算和寄存器更新在 AcquireTask 中完成。
+ */
+void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
 {
-    if (hadc->Instance == ADC1)
+    if (hadc != NULL && hadc->Instance == ADC1)       // 确认句柄有效，并且事件来自 ADC1
     {
-        adc_buf_ready = 1;  // 标记数据已更新
+        adc_buf_ready |= 1U;                         // 置位 bit0：DMA 前半区数据已经准备完成
+        adc_dma_notify_from_isr();                   // 在中断中通知 AcquireTask 处理前半区数据
     }
 }
+
+/**
+ * @brief  ADC DMA 全传输完成回调
+ * @param  hadc ADC 句柄，用于确认本次事件是否来自 ADC1
+ * @return 无
+ * @note   DMA 完成整个缓冲区后进入本函数，只记录状态并通知 AcquireTask。
+ *         此时后半区数据刚刚采集完成，可以复制和处理。
+ */
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
+{
+    if (hadc != NULL && hadc->Instance == ADC1)       // 确认句柄有效，并且事件来自 ADC1
+    {
+        adc_buf_ready |= 2U;                         // 置位 bit1：DMA 后半区数据已经准备完成
+        adc_dma_notify_from_isr();                   // 在中断中通知 AcquireTask 处理后半区数据
+    }
+}
+
+/*
+adc_buf_ready |= 1U
+→ 前半区完成
+→ AcquireTask 处理 adc_buf[0] ~ adc_buf[31]
+
+adc_buf_ready |= 2U
+→ 后半区完成
+→ AcquireTask 处理 adc_buf[32] ~ adc_buf[63]
+
+
+
 */

@@ -130,7 +130,8 @@ static int test_write_functions(void)
     request[2] = 0U;    // 目标寄存器地址高字节 → 0x00
     request[3] = 1U;    // 目标寄存器地址低字节 → 0x0001（寄存器 1）
     request[4] = 0U;    // 写入值高字节 → 0x00
-    request[5] = 42U;   // 写入值低字节 → 42
+    request[4] = 1U;    // 写入值高字节 → 0x01
+    request[5] = 44U;   // 写入值低字节 → 300（30.0℃）
 
     TEST_ASSERT_EQ(MODBUS_RTU_RESPONSE_READY, // 断言：处理函数返回"有待发送响应"状态
                    modbus_rtu_process_request(request, finalize_frame(request, 6U),
@@ -138,7 +139,7 @@ static int test_write_functions(void)
                                               &response_length));
 
     TEST_ASSERT_EQ(8U, response_length);                               // 写单个响应固定 8 字节（地址+功能码+地址+值+CRC）
-    TEST_ASSERT_EQ(UINT16_C(42), registers.holding[1]);                // 断言：holding[1] 已成功写入 42
+    TEST_ASSERT_EQ(UINT16_C(300), registers.holding[1]);               // 断言：holding[1] 已成功写入 300（30.0℃）
     TEST_ASSERT_EQ(0, assert_response_crc(response, response_length)); // 断言：响应帧 CRC 校验通过
 
     /* ── 切换为 0x10 写多个保持寄存器请求 ── */
@@ -147,17 +148,18 @@ static int test_write_functions(void)
     request[5] = 2U;    // 寄存器数量低字节 → 2（连续写 2 个寄存器）
     request[6] = 4U;    // 字节计数 → 4（2 个寄存器 × 2 字节/个）
     request[7] = 0U;    // 第 1 个寄存器值高字节 → 0x00
-    request[8] = 77U;   // 第 1 个寄存器值低字节 → 77
-    request[9] = 0U;    // 第 2 个寄存器值高字节 → 0x00
-    request[10] = 1U;   // 第 2 个寄存器值低字节 → 1
+    request[7] = 1U;    // 第 1 个寄存器值高字节 → 0x01
+    request[8] = 44U;   // 第 1 个寄存器值低字节 → 300（30.0℃）
+    request[9] = 1U;    // 第 2 个寄存器值高字节 → 0x01
+    request[10] = 144U; // 第 2 个寄存器值低字节 → 400（40.0℃）
 
     TEST_ASSERT_EQ(MODBUS_RTU_RESPONSE_READY, // 断言：处理函数正确响应写多个请求
                    modbus_rtu_process_request(request, finalize_frame(request, 11U),
                                               &registers, response, sizeof(response),
                                               &response_length));
 
-    TEST_ASSERT_EQ(UINT16_C(77), registers.holding[1]);                // 断言：holding[1] 被写为 77
-    TEST_ASSERT_EQ(UINT16_C(1), registers.holding[2]);                 // 断言：holding[2] 被写为 1
+    TEST_ASSERT_EQ(UINT16_C(300), registers.holding[1]);               // 断言：holding[1] 被写为 300
+    TEST_ASSERT_EQ(UINT16_C(400), registers.holding[2]);               // 断言：holding[2] 被写为 400
     TEST_ASSERT_EQ(0, assert_response_crc(response, response_length)); // 断言：响应帧 CRC 校验通过
 
     return 0; // 测试通过，返回 0
@@ -230,12 +232,13 @@ static int test_exceptions_and_silent_frames(void)
     request[2] = 0U;
     request[3] = 1U;
     request[4] = 0U;
-    request[5] = 55U;                      // 广播写：地址 0 + 0x06
+    request[4] = 2U;
+    request[5] = 88U;                      // 广播写：地址 1，写入 600（60.0℃）
     TEST_ASSERT_EQ(MODBUS_RTU_NO_RESPONSE, // 广播写：执行但不回复
                    modbus_rtu_process_request(request, finalize_frame(request, 6U),
                                               &registers, response, sizeof(response),
                                               &response_length));
-    TEST_ASSERT_EQ(UINT16_C(55), registers.holding[1]); // 但写入确实生效了
+    TEST_ASSERT_EQ(UINT16_C(600), registers.holding[1]); // 但写入确实生效了
 
     request[0] = 1U;
     request[1] = 0x10U; // 恢复地址 1，测 0x10 写越界（起始 0 写 1 个合法，仅占位）

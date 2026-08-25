@@ -36,8 +36,8 @@ static uint16_t table_count(modbus_register_table_t table)
  *
  * 原理（对应阶段 0 的寄存器表约束）：
  *   0x0000 采样周期：不能为 0（否则采集任务没法定时）
+ *   0x0001/0x0002 报警上下限：工程量采用 ×10，范围 20.0~80.0℃
  *   0x0003 SD 日志开关：只能是 0 或 1（布尔开关）
- *   其余地址：暂不限制
  *
  * 调用示例：
  *   if (!holding_value_is_valid(addr, val)) { ... }
@@ -52,6 +52,10 @@ static int holding_value_is_valid(uint16_t address, uint16_t value)
     if (address == 3U)
     {
         return value <= 1U; // SD 日志开关：只能是 0 或 1
+    }
+    if (address == 1U || address == 2U)
+    {
+        return value >= 200U && value <= 800U; // 温度上下限：20.0~80.0℃，单位为 0.1℃
     }
     return 1; 							// 其余地址无限制，直接返回合法
 }
@@ -73,7 +77,9 @@ static int holding_value_is_valid(uint16_t address, uint16_t value)
 void modbus_registers_init(modbus_registers_t *registers)
 {
     memset(registers, 0, sizeof(*registers)); // 将整个寄存器模型清零
-    registers->holding[0] = UINT16_C(1000);   // 保持寄存器 0x0000 默认采样周期 1000ms
+    registers->holding[0] = UINT16_C(1000);   // 0x0000：默认采样周期 1000ms
+    registers->holding[1] = UINT16_C(200);    // 0x0001：报警下限 20.0℃
+    registers->holding[2] = UINT16_C(400);    // 0x0002：报警上限 40.0℃
 }
 
 /* ════════════════════════════════════════════════════════════

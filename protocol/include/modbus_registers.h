@@ -35,7 +35,7 @@ typedef struct
     uint16_t holding[MODBUS_HOLDING_REGISTER_COUNT]; // 保持寄存器数组（可读写，存放配置参数）
 } modbus_registers_t;
 
-void modbus_registers_init(modbus_registers_t *registers); // 清零全部寄存器，并将采样周期（holding[0]）设为默认 1000ms
+void modbus_registers_init(modbus_registers_t *registers); // 清零全部寄存器，并设置采样周期及温度报警默认值
 
 modbus_register_status_t modbus_registers_update_input( // 更新一个输入寄存器的采集值
     modbus_registers_t *registers,                      // 输入/输出：寄存器模型
