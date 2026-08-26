@@ -4,6 +4,10 @@
 #include "./SysTick/SysTick.h"
 #include "./TIM7/TIM7.h"
 #include "./Usart/Usart.h"
+#include "./SDIO/bsp_sdio_sd.h"
+extern SD_HandleTypeDef uSdHandle;
+extern DMA_HandleTypeDef hdma_sd_rx;
+extern DMA_HandleTypeDef hdma_sd_tx;
 #include <stdio.h>
 #include "task.h"
 
@@ -167,6 +171,21 @@ void DMA2_Stream5_IRQHandler(void)
 void DMA2_Stream0_IRQHandler(void)
 {
     HAL_DMA_IRQHandler(&hdma_adc);
+}
+
+void SDIO_IRQHandler(void)
+{
+    HAL_SD_IRQHandler(&uSdHandle);                    // 交给 HAL 处理 SDIO 数据传输中断
+}
+
+void DMA2_Stream3_IRQHandler(void)
+{
+    HAL_DMA_IRQHandler(&hdma_sd_rx);                  // 处理 SD 卡 DMA 接收中断
+}
+
+void DMA2_Stream6_IRQHandler(void)
+{
+    HAL_DMA_IRQHandler(&hdma_sd_tx);                  // 处理 SD 卡 DMA 发送中断
 }
 
 /******************************************************************************/

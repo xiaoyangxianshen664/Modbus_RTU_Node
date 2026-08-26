@@ -84,6 +84,20 @@ void RTC_TimeAndDate_Set(void)
     HAL_RTCEx_BKUPWrite(&Rtc_Handle, RTC_BKP_DRX, RTC_BKP_DATA);     // 写 0x32F2，我们自己随便定的值， 到备份数据寄存器DR0
 }
 
+/**
+ * @brief  RTC 时间和日期一次性初始化
+ * @param  无
+ * @return 无
+ * @note   通过备份寄存器判断 RTC 是否已经设置，避免每次复位都恢复默认时间。
+ */
+void RTC_TimeAndDate_Init(void)
+{
+    if (HAL_RTCEx_BKUPRead(&Rtc_Handle, RTC_BKP_DRX) != RTC_BKP_DATA) // 备份标志不存在时才设置默认时间
+    {
+        RTC_TimeAndDate_Set();                                      // 首次上电或备份域被清除，写入默认时间
+    }
+}
+
 
 /* ════════════════════════════════════════════════════════════
  * RTC_TimeAndDate_Show — 循环显示时间（串口打印 + LED 闪闹钟）

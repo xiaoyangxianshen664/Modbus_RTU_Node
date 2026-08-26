@@ -32,6 +32,7 @@ extern RTC_HandleTypeDef Rtc_Handle;                                 // RTC 句�
 
 /* ── 函数声明 ── */
 void RTC_CLK_Config(void);                                           // 初始化 RTC 时钟（LSE + 预分频）
+void RTC_TimeAndDate_Init(void);                                     // 首次上电设置默认时间，后续保留 RTC 走时
 void RTC_TimeAndDate_Set(void);                                      // 设默认时间 + 写备份标志
 void RTC_TimeAndDate_Show(void);                                     // while(1) 循环显示时间
 void RTC_AlarmSet(void);                                             // 设闹钟 + 开中断

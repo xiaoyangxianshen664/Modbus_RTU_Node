@@ -9,16 +9,24 @@
 
 #include "freertos_demo.h"
 #include "FreeRTOS.h"
-#include "task.h"
-#include "semphr.h"
-#include "./485/bsp_485.h"
-#include "modbus_transport.h"
-#include "modbus_rtu.h"
-#include "modbus_registers.h"
-#include "./ADC/ADC_Multi.h"
+#include "task.h"													//"task.h"使用FreeRTOS任务及任务通知
+#include "semphr.h"												//"semphr.h"使用FreeRTOS信号量（互斥锁）
+#include "queue.h"												//`queue.h`：使用 FreeRTOS 队列；
+#include "./Fatfs/ff.h"										//`ff.h`：调用 FatFs 文件 API；
+#include "./Fatfs/ff_gen_drv.h"						//`ff_gen_drv.h`：注册 SD 驱动；
+#include "./Fatfs/sd_diskio.h"						//- `sd_diskio.h`：获取 `SD_Driver`；
+#include "./SDIO/bsp_sdio_sd.h"						//`bsp_sdio_sd.h`：访问 SD HAL 句柄和错误信息。
+#include "./485/bsp_485.h"								//RS485传输数据
+#include "./RTC/rtc.h"									  //`rtc.h`：读取 RTC 时间；
+#include "./ADC/ADC_Multi.h"							//ADC采集数据
 #include <string.h>
 #include <math.h>
 #include <stdio.h>
+/*算法*/
+#include "modbus_transport.h"
+#include "modbus_rtu.h"
+#include "modbus_registers.h"
+
 /* ════════════════════════════════════════════════════════════
  * 阶段 3 任务优先级配置
  *
@@ -49,8 +57,9 @@
 
 #define MODBUS_TASK_STACK_SIZE    512U  // ModbusTask 栈：512 word，约 2KB
 #define MONITOR_TASK_STACK_SIZE   128U  // MonitorTask 栈：128 word，约 512B
-#define ACQUIRE_TASK_STACK_SIZE   256U  // AcquireTask 栈：256 word，约 1KB（含采样快照和浮点换算）
-#define LOG_TASK_STACK_SIZE       128U  // LogTask 栈：128 word，约 512B
+#define ACQUIRE_TASK_STACK_SIZE   512U  // AcquireTask 栈：512 word，约 2KB（含 logf 浮点换算调用链）
+#define LOG_TASK_STACK_SIZE       512U  // LogTask 栈：512 word，约 2KB（FatFs/f_printf 调用链较深）
+#define LOG_QUEUE_LENGTH          16U   // LogQueue 最多同时保存 16 个 log_record_t 结构体，也就是 16 条完整采样记录。
 
 /* ════════════════════════════════════════════════════════════
  * 周期任务的运行周期
@@ -73,6 +82,12 @@
  * ════════════════════════════════════════════════════════════ */
 
 #define LOG_SIMULATED_LOAD_COUNT  200000U  // 模拟一次耗时日志操作的循环次数
+
+/* NTC 分压和 Beta 模型参数：当前模块为 R25=10KΩ、固定电阻=10KΩ、B=3950。 */
+#define NTC_R25_OHM                 10000.0f  // NTC 在 25℃ 时的标称电阻
+#define NTC_FIXED_RESISTOR_OHM      10000.0f  // ADC 分压电路中的固定电阻
+#define NTC_BETA                    3950.0f  // NTC 的 Beta 参数
+#define NTC_T25_K                   298.15f  // 25℃ 换算成开尔文：25+273.15
 
 /* ════════════════════════════════════════════════════════════
  * FreeRTOS 任务句柄
@@ -104,6 +119,23 @@ static TaskHandle_t LogTaskHandle;      // LogTask 的句柄，后续可用于�
  * ════════════════════════════════════════════════════════════ */
 
 static SemaphoreHandle_t RegisterMutex;  // 保护 g_registers，避免多个任务同时读写寄存器
+static QueueHandle_t LogQueue;            // AcquireTask 到 LogTask 的采集快照队列
+
+typedef struct
+{
+    RTC_TimeTypeDef time;                // 采集时刻的时分秒
+    RTC_DateTypeDef date;                // 采集时刻的年月日
+    uint16_t pot_raw;                    // 电位器 ADC 原始值
+    uint16_t pot_x10;                    // 电位器工程量 ×10
+    uint16_t ntc_raw;                    // NTC ADC 原始值
+    uint16_t ntc_temp_x10;               // 温度 ×10
+    uint16_t alarm_status;               // 报警状态
+} log_record_t;
+
+static FATFS g_fatfs;                    // FatFs 文件系统对象
+static char g_fatfs_path[4];             // 逻辑盘路径，例如 "0:/"
+static volatile uint32_t g_log_drop_count; // 队列满而丢弃的日志条数
+static volatile uint8_t g_log_storage_ready; // 1=FatFs 已挂载，0=SD 不可用
 
 /* ════════════════════════════════════════════════════════════
  * 共享 Modbus 寄存器表
@@ -203,7 +235,69 @@ static StackType_t uxTimerTaskStack[configTIMER_TASK_STACK_DEPTH];  // Timer Tas
 static void modbus_task(void *pvParameters);   // 等待完整帧通知，解析 Modbus 请求并发送响应
 static void monitor_task(void *pvParameters);  // 100ms 周期执行系统健康监测
 static void acquire_task(void *pvParameters);  // 100ms 周期采集数据并更新 input[] 寄存器
-static void log_task(void *pvParameters);      // 1s 周期获取寄存器快照并执行日志操作
+static void log_task(void *pvParameters);      // 从队列取快照并写入 SD 日志文件
+
+/**
+ * @brief  将 NTC ADC 原始值换算为温度（单位：0.1℃）
+ * @param  adc_raw ADC 原始值，12 位范围为 0～4095
+ * @return 温度放大 10 倍后的非负整数；例如 316 表示 31.6℃
+ * @note   使用 R25=10KΩ、固定电阻=10KΩ、B=3950 的 Beta 模型。
+ * @example uint16_t temp_x10 = ntc_adc_to_temp_x10(1750U);
+ */
+static uint16_t ntc_adc_to_temp_x10(uint16_t adc_raw)
+{
+    float resistance;                                      // 根据分压反推出的 NTC 电阻，单位 Ω
+    float kelvin;                                          // Beta 公式计算出的绝对温度，单位 K
+    float celsius_x10;                                     // 摄氏温度放大 10 倍后的中间值
+
+    if (adc_raw == 0U || adc_raw >= 4095U)                 // ADC 到达边界时无法得到有效电阻
+        return 0U;                                         // 无效输入按 0.0℃ 处理
+
+    resistance = NTC_FIXED_RESISTOR_OHM * (float)adc_raw /
+                 (float)(4095U - adc_raw);                 // Rntc=Rfixed×ADC/(4095-ADC)
+    kelvin = 1.0f / ((1.0f / NTC_T25_K) +
+                     (logf(resistance / NTC_R25_OHM) / NTC_BETA)); // Beta 模型
+    celsius_x10 = (kelvin - 273.15f) * 10.0f;               // 开尔文转摄氏度并放大 10 倍
+
+    if (celsius_x10 < 0.0f)                                // 限制最低保存值
+        celsius_x10 = 0.0f;
+    if (celsius_x10 > 800.0f)                              // 限制最高保存值为 80.0℃
+        celsius_x10 = 800.0f;
+
+    return (uint16_t)celsius_x10;                           // 转为整数，供寄存器、日志和报警使用
+}
+
+/**
+ * @brief  初始化 RTC 和 FatFs 存储
+ * @param  无
+ * @return 无
+ * @note   SD 卡或文件系统失败时只关闭日志存储，不影响其他任务和 Modbus 通信。
+ */
+void log_storage_init(void)
+{
+    FRESULT result;
+
+    if (FATFS_LinkDriver(&SD_Driver, g_fatfs_path) != 0U)          // 注册 SD 逻辑盘
+    {
+        printf("FatFs link driver failed\r\n");                   // 驱动表已满或注册失败
+        return;
+    }
+    result = f_mount(&g_fatfs, g_fatfs_path, 1U);                  // 立即挂载 FAT 文件系统
+    if (result == FR_OK)
+    {
+        g_log_storage_ready = 1U;                                  // 后续 LogTask 可以写文件
+        printf("FatFs mounted: %s\r\n", g_fatfs_path);           // 输出盘符，便于确认 SD 已就绪
+    }
+    else
+    {
+        printf("FatFs mount failed: %d\r\n", (int)result);        // 失败只报告，不阻塞系统
+        printf("SD HAL error: 0x%08lX\r\n",                         // 输出 SD 初始化阶段的 HAL 错误位
+               (unsigned long)HAL_SD_GetError(&uSdHandle));
+    }
+
+    RTC_CLK_Config();                                              // SD 挂载完成后再配置 LSE 和 RTC
+    RTC_TimeAndDate_Init();                                        // 首次上电写入默认时间
+}
 
 
 /* ════════════════════════════════════════════════════════════
@@ -269,6 +363,9 @@ void freertos_demo(void)
     RegisterMutex = xSemaphoreCreateMutex();                         			    // 创建寄存器互斥锁
     configASSERT(RegisterMutex != NULL);																	    // 创建失败则触发断言
 		
+		LogQueue = xQueueCreate(LOG_QUEUE_LENGTH, sizeof(log_record_t)); 					// 创建采集快照队列
+		configASSERT(LogQueue != NULL);                                  					// 队列创建失败则触发断言
+
 		/*1：创建 Modbus 通信任务*/
     result = xTaskCreate(modbus_task, "ModbusTask", MODBUS_TASK_STACK_SIZE,    
                          NULL, MODBUS_TASK_PRIORITY, &ModbusTaskHandle);			// 创建失败则触发断言
@@ -559,24 +656,7 @@ static void acquire_task(void *pvParameters)
         ntc_raw = (uint16_t)(ntc_sum / samples_per_channel);					// 计算 NTC ADC 平均值，总值ntc_raw/16
         pot_x10 = (uint16_t)(((uint32_t)pot_raw * 1000U) / 4095U);		// 电位器AO值0~4095 换算为 0~1000
 
-        /* 分压假设：3.3V -> 10K 固定电阻 -> PA4 -> NTC -> GND。 */
-        if (ntc_raw == 0U || ntc_raw >= 4095U)												// ADC 到达边界时无法反推出有效电阻
-        {
-            ntc_temp_x10 = 0U;																				// 无效输入暂按 0.0℃处理
-        }
-        else
-        {
-            const float resistance = 10000.0f * (float)ntc_raw /			// 根据分压公式计算 NTC 电阻
-                                      (float)(4095U - ntc_raw);
-            const float kelvin = 1.0f /																// 使用 10K、B3950 参数计算开尔文温度
-                ((1.0f / 298.15f) + (logf(resistance / 10000.0f) / 3950.0f));
-            float celsius_x10 = (kelvin - 273.15f) * 10.0f;						// 开尔文转摄氏度，并放大 10 倍
-            if (celsius_x10 < 0.0f)																		// 防止结果低于允许保存范围
-                celsius_x10 = 0.0f;
-            if (celsius_x10 > 800.0f)																  // 防止结果超过 80.0℃
-                celsius_x10 = 800.0f;
-            ntc_temp_x10 = (uint16_t)celsius_x10;										  // 转成整数，准备写入 Modbus 寄存器
-        }
+        ntc_temp_x10 = ntc_adc_to_temp_x10(ntc_raw);       // 使用 10K/10K/B3950 参数换算温度
 
         /* 读取配置和更新输入寄存器必须使用同一把互斥锁。 */
         xSemaphoreTake(RegisterMutex, portMAX_DELAY);									// 获取寄存器互斥锁，保护共享寄存器
@@ -607,6 +687,19 @@ static void acquire_task(void *pvParameters)
                (unsigned)(ntc_temp_x10 / 10U), (unsigned)(ntc_temp_x10 % 10U),// 输出温度工程值
                (unsigned)alarm_status);																				// 输出报警状态
 
+        {
+            log_record_t record;                              								// 本次采集的日志快照对应结构体：记录时间和采样值的
+            HAL_RTC_GetTime(&Rtc_Handle, &record.time, RTC_FORMAT_BIN); 			// 读取时间
+            HAL_RTC_GetDate(&Rtc_Handle, &record.date, RTC_FORMAT_BIN); 			// 紧接着读取日期
+            record.pot_raw = pot_raw;                          								// 保存电位器原始值
+            record.pot_x10 = pot_x10;                          								// 保存电位器工程量
+            record.ntc_raw = ntc_raw;                          								// 保存 NTC 原始值
+            record.ntc_temp_x10 = ntc_temp_x10;                								// 保存温度工程值
+            record.alarm_status = alarm_status;                								// 保存报警状态
+            if (xQueueSend(LogQueue, &record, 0U) != pdPASS)    							// 发送采集数据到队列，队列满时不阻塞采集任务
+                g_log_drop_count++;                            								// 记录丢弃数量
+        }
+
 							 
 				/*
 				每成功处理一批 ADC 数据，就加 1。
@@ -620,36 +713,63 @@ static void acquire_task(void *pvParameters)
 }
 
 /* ════════════════════════════════════════════════════════════
- * log_task — 获取寄存器快照并模拟低优先级日志负载
+ * log_task — 从日志队列取出快照并写入 SD 卡 CSV 文件
  *
  * 原型：static void log_task(void *pvParameters)
  *       pvParameters — [输入] 任务参数，本任务未使用
  * 返值：无；任务函数不会返回
  *
- * 原理：锁内只复制快照，耗时模拟放在锁外；阶段 5 再换成 RTC + SD/FatFs。
+ * 原理：AcquireTask 是生产者，LogTask 是消费者；SD/FatFs 写入只在本任务中执行，
+ *       SD 缺失或挂载失败时不影响 Modbus 和 ADC 采集任务。
  *
  * 调用示例：
  *   xTaskCreate(log_task, "LogTask", 128, NULL, 1, &handle);
  * ════════════════════════════════════════════════════════════ */
 static void log_task(void *pvParameters)
 {
-    TickType_t lastWakeTime = xTaskGetTickCount();
-    modbus_registers_t registerSnapshot;
+    log_record_t record;									// 保存从队列取出的单条采样快照
+    FIL file;															// FatFs 文件对象，代表当前打开的文件
+    UINT written;													// 保存 f_write 实际写入的字节数
+    static uint8_t header_written;				// 静态变量只初始化一次，用于记录表头是否写过
+    (void)pvParameters;										// 本任务不使用创建参数，避免编译器产生未使用警告
 
-    (void)pvParameters;
-
-    for (;;)
+    for (;;)															// 任务永久循环运行，不允许任务函数正常返回
     {
-        xSemaphoreTake(RegisterMutex, portMAX_DELAY);                 // 只在复制快照期间占用互斥锁
-        registerSnapshot = g_registers;
-        xSemaphoreGive(RegisterMutex);
+        if (xQueueReceive(LogQueue, &record, portMAX_DELAY) != pdPASS) // 从日志队列接收一条采样记录；队列为空时永久阻塞等待
+            continue;																									 // 接收失败则跳过本轮，回到for循环开头等待下一条日志记录
 
-        g_last_logged_input = registerSnapshot.input[0];             // 保存本轮模拟日志的数据
-        for (volatile uint32_t load = 0U; load < LOG_SIMULATED_LOAD_COUNT; ++load)
+        if (g_log_storage_ready != 0U)                								 // 检查 SD 卡存储是否已经初始化并挂载成功
         {
-        }                                                            // 在锁外模拟较慢的 SD 写入工作
+            if (f_open(&file, "0:/measure.csv", FA_OPEN_APPEND | FA_WRITE) == FR_OK)// 以追加写模式打开 CSV 文件；文件不存在时由模式决定是否创建需结合 FatFs 配置
+            {
+                if (header_written == 0U)																						// 如果 CSV 表头还没有写入
+                {
+                    const char *header = "date,time,pot_raw,pot_x10,ntc_raw,temp_x10,alarm\r\n";// 定义 CSV 第一行字段名称
+                    if (f_write(&file, header, (UINT)strlen(header), &written) == FR_OK &&	//将表头字符串写入文件，并检查 FatFs 写操作是否成功
+                        written == (UINT)strlen(header))																		// 检查实际写入字节数是否与表头长度完全一致，防止只写入部分数据
+                        header_written = 1U;                    														// 表头完整写入后设置标志，后续日志不再重复写表头
+                }
+                f_printf(&file, "20%02u-%02u-%02u,%02u:%02u:%02u,%u,%u,%u,%u,%u\r\n",				// 按 CSV 格式将时间、采样值和报警状态格式化后写入文件
+                         record.date.Year, 																									// 写入年份的后两位，例如 26 表示 2026
+												 record.date.Month, 																								// 写入月份
+												 record.date.Date,																									// 写入日期
+                         record.time.Hours, 																								// 写入小时
+								         record.time.Minutes, 																							// 写入分钟
+								         record.time.Seconds,																								// 写入秒
+                         record.pot_raw, 																										// 写入电位器 ADC 原始采样值
+												 record.pot_x10, 																										// 写入经过换算的电位器工程值
+												 record.ntc_raw,																										// 写入 NTC ADC 原始采样值
+                         record.ntc_temp_x10, 																							// 写入 NTC 温度值，通常按 ×10 保存
+												 record.alarm_status);																							// 写入当前报警状态
+                f_close(&file);                                							 // 关闭文件，释放 FatFs 文件对象并提交文件操作
+            }
+        }
+        else
+        {
+            for (volatile uint32_t load = 0U; load < LOG_SIMULATED_LOAD_COUNT; ++load) { } // SD 不可用时执行一小段模拟负载，模拟日志任务仍然在运行
+        }
 
-        g_log_heartbeat++;
-        vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(LOG_PERIOD_MS)); // 每 1s 执行一次模拟日志
+        g_last_logged_input = record.pot_raw;                     // 保存本次成功从日志队列取出的快照中的电位器原始值
+        g_log_heartbeat++;                                        // 日志任务心跳计数加一，用于监控 LogTask 是否仍在正常运行
     }
 }
