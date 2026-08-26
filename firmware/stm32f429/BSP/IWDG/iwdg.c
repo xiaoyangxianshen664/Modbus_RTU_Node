@@ -13,17 +13,18 @@ IWDG_HandleTypeDef IWDG_Handle;                                      // IWDG 句
  *
  * 原理：独立看门狗由 LSI（~40KHz）驱动，不依赖系统时钟。
  *       就算 PLL 崩了、HSE 停了，IWDG 照样跑。
- *       超时公式：Tout = (prv / 40) × rlv （秒）
+ *       超时公式：Tout ≈ (Reload + 1) × Prescaler / LSI （秒）。
+ *       LSI 典型频率约 40kHz，实际值会随芯片和温度变化。
  *       一旦启动就无法停止，只能喂狗推迟复位。
  *
  * 调用示例：
- *   IWDG_Config(IWDG_PRESCALER_64, 625);  // (64/40)×625 ≈ 1 秒超时
+ *   IWDG_Config(IWDG_PRESCALER_256, 625);  // (625+1)×25/40000 ≈ 4 秒超时
  * ════════════════════════════════════════════════════════════ */
 void IWDG_Config(uint8_t prv, uint16_t rlv)
 {
     IWDG_Handle.Instance = IWDG;                                     // IWDG 外设
-    IWDG_Handle.Init.Prescaler = prv;                                 // 预分频系数（分 LSI 时钟）
-    IWDG_Handle.Init.Reload    = rlv;                                 // 重装载值（递减计数器初值）
+    IWDG_Handle.Init.Prescaler = prv;                                 // 将 LSI 时钟40MHZ进行 256 分频
+    IWDG_Handle.Init.Reload    = rlv;                                 // 625U，看门狗递减计数器的重装值
     HAL_IWDG_Init(&IWDG_Handle);                                      // 初始化 IWDG
     __HAL_IWDG_START(&IWDG_Handle);                                   // 启动看门狗，开始倒计时
 }

@@ -8,6 +8,7 @@
 #include "modbus_transport.h"
 #include "freertos_demo.h"
 #include "./ADC/ADC_Multi.h"
+#include "./IWDG/iwdg.h"
 #include <stdio.h>
 
 /**
@@ -46,6 +47,7 @@ static void WIFI_PDN_Init(void)
 int main(void)
 {
   HAL_Init();                                         // 初始化 HAL、NVIC 分组和默认 SysTick
+  diagnostics_init();                                 // 在启动看门狗前，记录上一次复位原因
   SysTick_Init();                                     // 配置 HSE 25MHz → 系统时钟 180MHz
   TIM7_Init();                                        // TIM7 提供 HAL 的 1ms 时基，避免与 FreeRTOS SysTick 冲突
   WIFI_PDN_Init();                                    // 关闭 WiFi，释放 SDIO 相关资源
@@ -62,8 +64,9 @@ int main(void)
   modbus_transport_init();                            // TIM4 计量 T1.5/T3.5，判断帧内超时和帧结束
   ADC_Multi_Init();                                   // 阶段 4：启动 PC3 + PA4 两路 ADC DMA 扫描
   log_storage_init();                                 // 阶段 5：初始化 RTC 并挂载 SD 文件系统
+  IWDG_Config(IWDG_PRESCALER_256, 625U);              // 阶段 6：按典型 40kHz LSI 约 4 秒超时
 
-  printf("Modbus RTU Node - ADC DMA stage 4!\r\n");  // 调度器启动前从 USART1 输出一次启动信息
+  printf("Modbus RTU Node - ADC DMA stage 6!\r\n");  // 调度器启动前从 USART1 输出一次启动信息
 
   freertos_demo();                                    // 创建四个业务任务并启动 FreeRTOS 调度器
 

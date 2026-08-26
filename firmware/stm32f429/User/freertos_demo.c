@@ -16,6 +16,7 @@
 #include "./Fatfs/ff_gen_drv.h"						//`ff_gen_drv.h`：注册 SD 驱动；
 #include "./Fatfs/sd_diskio.h"						//- `sd_diskio.h`：获取 `SD_Driver`；
 #include "./SDIO/bsp_sdio_sd.h"						//`bsp_sdio_sd.h`：访问 SD HAL 句柄和错误信息。
+#include "./IWDG/iwdg.h"										// 独立看门狗配置和喂狗接口
 #include "./485/bsp_485.h"								//RS485传输数据
 #include "./RTC/rtc.h"									  //`rtc.h`：读取 RTC 时间；
 #include "./ADC/ADC_Multi.h"							//ADC采集数据
@@ -136,6 +137,14 @@ static FATFS g_fatfs;                    // FatFs 文件系统对象
 static char g_fatfs_path[4];             // 逻辑盘路径，例如 "0:/"
 static volatile uint32_t g_log_drop_count; // 队列满而丢弃的日志条数
 static volatile uint8_t g_log_storage_ready; // 1=FatFs 已挂载，0=SD 不可用
+static volatile uint32_t g_reset_cause;         // 保存上一次复位原因
+static volatile uint32_t g_health_fault_count;  // MonitorTask 检测到系统不健康时累计的故障次数
+static volatile uint32_t g_log_write_error_count; // SD 文件打开或写入失败的次数
+static uint32_t g_last_acquire_heartbeat;       // 上一轮 MonitorTask 记录的采集心跳
+static uint32_t g_last_log_heartbeat;           // 上一轮 MonitorTask 记录的日志心跳
+static uint8_t g_health_snapshot_valid;         // 是否已经建立心跳基线：0 表示第一次检查、还没有基线；1 表示已经可以正式比较心跳。
+static uint8_t g_acquire_stall_ticks;            // 每100ms+1，达到 20 次约 2 秒才判定采集任务异常。
+static uint8_t g_log_stall_ticks;               // 每100ms+1，达到 20 次约 2 秒才判定日志任务停滞。
 
 /* ════════════════════════════════════════════════════════════
  * 共享 Modbus 寄存器表
@@ -236,6 +245,26 @@ static void modbus_task(void *pvParameters);   // 等待完整帧通知，解析
 static void monitor_task(void *pvParameters);  // 100ms 周期执行系统健康监测
 static void acquire_task(void *pvParameters);  // 100ms 周期采集数据并更新 input[] 寄存器
 static void log_task(void *pvParameters);      // 从队列取快照并写入 SD 日志文件
+
+/**
+ * @brief  读取并保存 MCU 上一次复位原因
+ * @param  无
+ * @return 无
+ * @note   RCC->CSR 的复位标志必须在启动早期读取；随后清除，避免下一次启动混入旧原因。
+ *         保存值的 bit0~bit6 依次表示 IWDG、WWDG、软件、外部引脚、上电、BOR、低功耗复位。
+ */
+void diagnostics_init(void)																 //复位诊断初始化函数
+{
+    g_reset_cause = 0U;                                    // 先清空应用层使用的紧凑复位原因位图
+    if (__HAL_RCC_GET_FLAG(RCC_FLAG_IWDGRST) != RESET) g_reset_cause |= (1U << 0); // 独立看门狗复位
+    if (__HAL_RCC_GET_FLAG(RCC_FLAG_WWDGRST) != RESET) g_reset_cause |= (1U << 1); // 窗口看门狗复位
+    if (__HAL_RCC_GET_FLAG(RCC_FLAG_SFTRST) != RESET)  g_reset_cause |= (1U << 2); // 软件复位
+    if (__HAL_RCC_GET_FLAG(RCC_FLAG_PINRST) != RESET)  g_reset_cause |= (1U << 3); // 外部 NRST 复位
+    if (__HAL_RCC_GET_FLAG(RCC_FLAG_PORRST) != RESET)  g_reset_cause |= (1U << 4); // 上电/掉电复位
+    if (__HAL_RCC_GET_FLAG(RCC_FLAG_BORRST) != RESET)  g_reset_cause |= (1U << 5); // 欠压复位
+    if (__HAL_RCC_GET_FLAG(RCC_FLAG_LPWRRST) != RESET) g_reset_cause |= (1U << 6); // 低功耗复位
+    __HAL_RCC_CLEAR_RESET_FLAGS();                        // 清除硬件标志，等待记录下一次真实复位
+}
 
 /**
  * @brief  将 NTC ADC 原始值换算为温度（单位：0.1℃）
@@ -571,16 +600,92 @@ static void modbus_task(void *pvParameters)
  *
  * 调用示例：
  *   xTaskCreate(monitor_task, "MonitorTask", 128, NULL, 4, &handle);
+* 作用
+	MonitorTask 每 100ms 醒来一次，检查关键任务有没有持续推进；如果健康就喂 IWDG，
+	如果发现关键任务持续异常就停止喂狗，让 IWDG 最终复位 MCU，
+	同时把诊断结果写入 Modbus 的 input[8]~input[11]。
+  它主要负责：监测 → 判断 → 记录 → 决定是否喂狗 → 上报
  * ════════════════════════════════════════════════════════════ */
 static void monitor_task(void *pvParameters)
 {
-    TickType_t lastWakeTime = xTaskGetTickCount();
-
-    (void)pvParameters;
+    TickType_t lastWakeTime = xTaskGetTickCount();								 //获取当前 FreeRTOS 系统 Tick 计数。
+															   //先在地上做一个起点标记，vTaskDelayUntil() 能保持固定任务周期的原因。
+    (void)pvParameters;																						//避免编译器报告“参数未使用”的警告。
 
     for (;;)
     {
-        g_monitor_heartbeat++;                                       // 阶段 6 将在这里检查其他任务心跳并决定喂狗
+        uint8_t health_ok = 1U;                                      // 注意这个变量是本轮结果，每 100 ms 进入循环时都会重新初始化为 1
+																																		 //如果后面发现 AcquireTask 或 LogTask 异常，再改成：0
+				/*第一轮开始，程序进入这里。*/
+        if (g_health_snapshot_valid == 0U)                          // 是否已经保存过上一轮的心跳值，程序刚启动时，全局变量默认是 0，所以第一次会进入这里。
+        {
+						g_last_acquire_heartbeat = g_acquire_heartbeat;          // 保存采集任务当前心跳，g_acquire_heartbeat初始值为0
+						g_last_log_heartbeat = g_log_heartbeat;                  // 保存日志任务当前心跳，g_log_heartbeat初始值为0
+            g_health_snapshot_valid = 1U;                            // 后续轮次开始正式比较
+        }
+				/*从第二轮开始，程序进入这里。*/
+        else
+        {
+            if (g_acquire_heartbeat == g_last_acquire_heartbeat)     // 当前 AcquireTask 心跳和上一次保存的值一样
+            {
+							if (g_acquire_stall_ticks < 0xFFU)                   // g_acquire_stall_ticks是AcquireTask不工作时+1
+                    g_acquire_stall_ticks++;											 //0xFFU是值255，怕（uint8_t）g_acquire_stall_ticks溢出
+            }
+            else
+                g_acquire_stall_ticks = 0U;                         // 采集任务恢复推进，清除连续停滞计数
+
+            if (g_acquire_stall_ticks >= 20U)                        // 连续 20 个监测周期没有看到 AcquireTask 心跳变化。
+                health_ok = 0U;																			 //发现AcquireTask异常，健康值设置0，一会写入input[11]
+						
+						/*
+						条件一：g_log_heartbeat == g_last_log_heartbeat，表示LogTask 的心跳没有变化，这个任务不工作了
+						条件二：uxQueueMessagesWaiting(LogQueue) > 0U 表示LogQueue 中还有数据等待处理。
+						为什么必须检查队列有数据？ 因为如果队列为空，LogTask 阻塞等待是正常行为，不能认为它卡死。
+						只有队列里有数据，但 LogTask 没有消费，才可能表示 LogTask 停滞。
+						*/
+            if (g_log_heartbeat == g_last_log_heartbeat &&
+                uxQueueMessagesWaiting(LogQueue) > 0U)               // 比较日志任务心跳并检查队列
+            {
+                if (g_log_stall_ticks < 0xFFU)                       // 和 AcquireTask 一样，防止 8 位计数器超过 255 后溢出。
+                    g_log_stall_ticks++;
+            }
+            else
+                g_log_stall_ticks = 0U;                              // 日志任务恢复运行，清除连续停滞计数
+					
+						
+						/*
+						条件一：表示 SD/FatFs 已经成功挂载。
+						条件二：有日志积压，并且连续约 2 秒没有被 LogTask 消费。
+						如果 SD 根本没有挂载，就不使用这条“日志停滞”判断。
+						*/
+            if (g_log_storage_ready != 0U && g_log_stall_ticks >= 20U) // SD 已挂载且队列有积压、连续 2 秒无消费才判故障
+                health_ok = 0U;
+
+            g_last_acquire_heartbeat = g_acquire_heartbeat;          // g_acquire_heartbeat在acquire_task采集任务每次采集后+1，此处第二次进入监测函数时，把1赋值给g_last_acquire_heartbeat
+            g_last_log_heartbeat = g_log_heartbeat;                  // g_last_log_heartbeatlog_task日志任务每次完成后+1，此处第二次进入监测函数时，把1赋值给g_last_log_heartbeat
+        }
+
+        if (health_ok != 0U)                                          // 关键任务都在运行
+        {
+            IWDG_Feed();                                             // 健康时喂狗，避免无故复位
+        }
+        else
+        {
+            g_health_fault_count++;                                  // 每次 MonitorTask 发现本轮不健康，就增加一次。
+        }
+			
+        xSemaphoreTake(RegisterMutex, portMAX_DELAY);                // 获取寄存器互斥锁
+        modbus_registers_update_input(&g_registers, 8U,
+                                     (uint16_t)g_reset_cause);        // input[8]：最近一次复位原因位图
+        modbus_registers_update_input(&g_registers, 9U,
+                                     (uint16_t)g_health_fault_count); // input[9]：心跳故障次数
+        modbus_registers_update_input(&g_registers, 10U,
+                                     (uint16_t)(g_log_drop_count + g_log_write_error_count)); // input[10]：日志丢弃及写入错误总数
+        modbus_registers_update_input(&g_registers, 11U,
+                                     (uint16_t)(health_ok != 0U));    // input[11]：本轮健康状态，1=正常
+        xSemaphoreGive(RegisterMutex);                               // 释放诊断寄存器锁
+
+        g_monitor_heartbeat++;                                       // 当前只用于观察自身是否继续运行，没有写入input寄存器
         vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(MONITOR_PERIOD_MS)); // 保持严格 100ms 周期
     }
 }
@@ -740,7 +845,7 @@ static void log_task(void *pvParameters)
 
         if (g_log_storage_ready != 0U)                								 // 检查 SD 卡存储是否已经初始化并挂载成功
         {
-            if (f_open(&file, "0:/measure.csv", FA_OPEN_APPEND | FA_WRITE) == FR_OK)// 以追加写模式打开 CSV 文件；文件不存在时由模式决定是否创建需结合 FatFs 配置
+            if (f_open(&file, "0:/measure.csv", FA_OPEN_APPEND | FA_WRITE) == FR_OK)// 以追加写模式打开 CSV 文件
             {
                 if (header_written == 0U)																						// 如果 CSV 表头还没有写入
                 {
@@ -749,7 +854,7 @@ static void log_task(void *pvParameters)
                         written == (UINT)strlen(header))																		// 检查实际写入字节数是否与表头长度完全一致，防止只写入部分数据
                         header_written = 1U;                    														// 表头完整写入后设置标志，后续日志不再重复写表头
                 }
-                f_printf(&file, "20%02u-%02u-%02u,%02u:%02u:%02u,%u,%u,%u,%u,%u\r\n",				// 按 CSV 格式将时间、采样值和报警状态格式化后写入文件
+                if (f_printf(&file, "20%02u-%02u-%02u,%02u:%02u:%02u,%u,%u,%u,%u,%u\r\n", // 按 CSV 格式写入一条采样记录
                          record.date.Year, 																									// 写入年份的后两位，例如 26 表示 2026
 												 record.date.Month, 																								// 写入月份
 												 record.date.Date,																									// 写入日期
@@ -760,9 +865,17 @@ static void log_task(void *pvParameters)
 												 record.pot_x10, 																										// 写入经过换算的电位器工程值
 												 record.ntc_raw,																										// 写入 NTC ADC 原始采样值
                          record.ntc_temp_x10, 																							// 写入 NTC 温度值，通常按 ×10 保存
-												 record.alarm_status);																							// 写入当前报警状态
-                f_close(&file);                                							 // 关闭文件，释放 FatFs 文件对象并提交文件操作
+												 record.alarm_status) < 0)                          
+								
+								/*  f_printf 返回负数表示格式化写入失败，g_log_write_error_count++*/
+								
+                    g_log_write_error_count++;             															// 记录 SD 文件写入故障，供诊断寄存器input[10]读取
+								
+                if (f_close(&file) != FR_OK)                                                              // 关闭文件时也可能提交失败
+                    g_log_write_error_count++;                                                            // 记录关闭/提交阶段的存储故障
             }
+            else
+                g_log_write_error_count++;                                                                // 文件打开失败，记录一次 SD 写入故障
         }
         else
         {
