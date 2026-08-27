@@ -9,6 +9,7 @@
 #include "freertos_demo.h"
 #include "./ADC/ADC_Multi.h"
 #include "./IWDG/iwdg.h"
+#include "./Config/config_storage.h"
 #include <stdio.h>
 
 /**
@@ -64,6 +65,7 @@ int main(void)
   modbus_transport_init();                            // TIM4 计量 T1.5/T3.5，判断帧内超时和帧结束
   ADC_Multi_Init();                                   // 阶段 4：启动 PC3 + PA4 两路 ADC DMA 扫描
   log_storage_init();                                 // 阶段 5：初始化 RTC 并挂载 SD 文件系统
+  config_storage_init();                              // 阶段 7：初始化 W25Q256 配置存储
   IWDG_Config(IWDG_PRESCALER_256, 625U);              // 阶段 6：按典型 40kHz LSI 约 4 秒超时
 
   printf("Modbus RTU Node - ADC DMA stage 6!\r\n");  // 调度器启动前从 USART1 输出一次启动信息

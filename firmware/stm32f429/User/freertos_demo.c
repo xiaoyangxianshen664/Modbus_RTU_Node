@@ -17,6 +17,7 @@
 #include "./Fatfs/sd_diskio.h"						//- `sd_diskio.h`：获取 `SD_Driver`；
 #include "./SDIO/bsp_sdio_sd.h"						//`bsp_sdio_sd.h`：访问 SD HAL 句柄和错误信息。
 #include "./IWDG/iwdg.h"										// 独立看门狗配置和喂狗接口
+#include "./Config/config_storage.h"										// W25Q256 配置持久化接口
 #include "./485/bsp_485.h"								//RS485传输数据
 #include "./RTC/rtc.h"									  //`rtc.h`：读取 RTC 时间；
 #include "./ADC/ADC_Multi.h"							//ADC采集数据
@@ -388,7 +389,8 @@ void vApplicationGetTimerTaskMemory(StaticTask_t **ppxTimerTaskTCBBuffer,
 void freertos_demo(void)
 {
     BaseType_t result;																									      // FreeRTOS API 返回值
-    modbus_registers_init(&g_registers);                                      // 初始化寄存器，holding[0]=1000
+    modbus_registers_init(&g_registers);                                      // 初始化寄存器，默认值 holding[0]=1000，holding[1] = 200 holding[2] = 400 ，holding[3] = 0
+	config_storage_load_holding(g_registers.holding);                         	// 阶段 7：优先加载 Flash 中的有效配置，第一次上电应该是用的默认配置
     RegisterMutex = xSemaphoreCreateMutex();                         			    // 创建寄存器互斥锁
     configASSERT(RegisterMutex != NULL);																	    // 创建失败则触发断言
 		
@@ -579,6 +581,7 @@ static void modbus_task(void *pvParameters)
             memcpy(g_registers.holding, registerSnapshot.holding,			//现在短暂获取互斥锁，把结果一次性提交到实时寄存器。
                    sizeof(g_registers.holding));                     
             xSemaphoreGive(RegisterMutex);
+            config_storage_save_holding(registerSnapshot.holding);    // 保持寄存器变化后保存到 W25Q256
         }
 
         g_modbus_heartbeat++;                                        // 记录 ModbusTask 已完成一轮处理

@@ -911,6 +911,26 @@
               <FilePath>..\BSP\SDIO\bsp_sdio_sd.h</FilePath>
             </File>
             <File>
+              <FileName>SPI_Flash.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\BSP\SPI\SPI_Flash.c</FilePath>
+            </File>
+            <File>
+              <FileName>SPI_Flash.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\BSP\SPI\SPI_Flash.h</FilePath>
+            </File>
+            <File>
+              <FileName>config_storage.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\BSP\Config\config_storage.c</FilePath>
+            </File>
+            <File>
+              <FileName>config_storage.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\BSP\Config\config_storage.h</FilePath>
+            </File>
+            <File>
               <FileName>iwdg.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\BSP\IWDG\iwdg.c</FilePath>
