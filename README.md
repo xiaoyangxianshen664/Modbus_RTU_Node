@@ -1,8 +1,22 @@
 # Modbus_RTU_Node
 
-基于 STM32F429 与 FreeRTOS 的 Modbus RTU 数据采集节点。
+基于 STM32F429 / STM32F103RCT6 与 FreeRTOS 的 Modbus RTU 数据采集节点。
 
-面向工业现场通信场景的 MCU 从站设备：完整寄存器模型、异常处理、可靠 RS485 通信和任务协作。
+项目从 PC 端协议测试、开发板固件逐步推进到专用 PCB 设计、焊接和整机联调，已在自制 STM32F103RCT6 板上跑通 Modbus、双路 ADC、W25Q256 配置持久化、RTC、SDIO/FatFs 日志、任务健康监控和 IWDG。
+
+![自制板完整测试接线](images/rct6-project/05-full-test-setup.jpg)
+
+[查看 RCT6 硬件移植与调试报告](docs/RCT6硬件移植与调试报告.md)
+
+## 实机结果
+
+- Keil MDK-ARM：`0 Error(s), 0 Warning(s)`
+- 固件占用：`Code=60552`、`RO-data=1228`、`RW-data=200`、`ZI-data=21440`
+- RCT6 资源配置：Flash 256 KB、SRAM 48 KB
+- FreeRTOS：Modbus、Monitor、Acquire、Log 四任务稳定运行
+- 5 分钟压力测试：1521 帧，帧头错误 0，CRC 错误 0，健康故障 0，日志错误 0
+- SD 卡：FatFs 挂载、CSV 追加写入和跨复位读取正常
+- W25Q256：双槽配置保存、回读校验和断电恢复正常
 
 ## 当前进度
 
@@ -58,9 +72,11 @@
   - 错误 CRC、非法功能码、非法地址、非法数量和非法参数测试通过
   - 5 分钟混合轮询压力测试共 1131 帧，CRC 错误为 0，无通信中断
   - SD 写入期间持续轮询正常；读卡器已确认 `measure.csv` 存在并包含 11049 条有效记录
-- 阶段 9：专用 PCB 设计与硬件联调，进行中
-  - 根据已验证固件整理 MCU 引脚、RS485、W25Q256、ADC、RTC、SDIO 和电源接口
-  - 完成原理图、PCB、打板焊接、烧录及整机功能验证
+- 阶段 9：专用 PCB 设计、焊接与硬件联调已完成 ✅
+  - 完成 STM32F103RCT6 专用板原理图、PCB、打板、焊接和迭代记录
+  - 单项验证 LED/按键、USART1、RS485、CAN、双 ADC DMA、W25Q256、AT24C02C、SDIO/FatFs 和 RTC/VBAT
+  - 将阶段 1~8 完整项目固件移植到 RCT6，修正 Flash/SRAM 配置并保持四任务架构
+  - 完成 Modbus 功能、异常、广播、运行时报警、掉电保存、CSV 日志和 5 分钟压力测试
 
 阶段 1 的 PC 端测试使用 CMake、gcc 和 CTest，当前 4 组测试全部通过。
 阶段 2 修正 T1.5 状态机后，8 项 RS485 串口测试已重新回归并全部通过。
@@ -70,6 +86,7 @@
 阶段 6 Keil 编译为 0 Error、0 Warning；已完成 input/holding 寄存器、复位诊断、健康状态和 IWDG 自动复位实机测试。
 阶段 7 Keil 编译为 0 Error、0 Warning；W25Q256 配置持久化、复位恢复、断电恢复和双槽交替保存已完成实机验证。
 阶段 8 已完成系统级验收：协议、异常、广播、边界、原子性、CRC 错误、并发轮询和 5 分钟压力测试全部通过；SD 日志文件已完成电脑端内容验证。
+阶段 9 已完成专用 PCB 的设计、焊接、单项外设验证和 RCT6 整机固件验收；详细证据见 [RCT6 硬件移植与调试报告](docs/RCT6硬件移植与调试报告.md)。
 
 ## 项目结构
 
@@ -78,7 +95,9 @@ protocol/include/   协议层头文件
 protocol/src/       协议层实现
 tests/              PC 端单元测试与集成测试
 firmware/           STM32F429 + FreeRTOS 固件工程
+RCT6硬件测试/RCT6项目代码/ STM32F103RCT6 完整项目工程
 docs/               项目文档、架构图和测试资料
+images/rct6-project/ 阶段 9 实物、原理图、PCB 和实测截图
 ```
 
 ## 编译与测试
@@ -89,8 +108,8 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-## 后续计划
+## 当前结论
 
-阶段 9：设计专用 PCB，并在自制板上重新验证 Modbus、ADC、W25Q256、RTC、SD 和掉电恢复。
+阶段 1~9 已完成。项目已经覆盖协议实现、RTOS 任务协作、外设驱动、数据采集、掉电存储、文件日志、硬件设计、焊接调试和整机验收的完整流程。
 
-阶段 10：整理最终架构图、任务表、寄存器表、接线图、PCB 图片和测试证据，完善 GitHub 项目资料。
+当前已知边界：RTC 日期尚未通过上位机同步；IWDG 已正常运行，但 RCT6 整机版本尚未单独执行“停止喂狗”的故障注入测试。这两项不影响现有功能验收，可作为后续增强。
